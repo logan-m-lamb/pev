@@ -21,11 +21,11 @@ if lib_was_found == False:
 
 try:
     pe_init = _pe.pe_init
-    ispe = _pe.ispe
+    is_pe = _pe.is_pe
+    pe_get_optional = _pe.pe_get_optional
 except AttributeError:
     raise ImportError("Error loading pe")
 
-print 'good so far'
 #==============================================================================
 # libPe Interface
 #==============================================================================
@@ -449,9 +449,13 @@ pythonapi.PyFile_AsFile.restype = FILE_ptr
 peFile = _PE_FILE()
 peFile_ptr = byref(peFile)
 ret = pe_init(peFile_ptr, pythonapi.PyFile_AsFile(f))
-print ret
-ret = ispe(peFile_ptr)
-print ret
-# print peFile.isdll
-# print peFile.entrypoint.value
-# print peFile_ptr
+print 'pe_init', ret
+ret = is_pe(peFile_ptr)
+print 'is_pe', ret
+ret = pe_get_optional(peFile_ptr)
+print 'pe_get_optional', ret
+ret = is_pe(peFile_ptr)
+print 'is_pe', ret
+print peFile.e_lfanew
+print peFile.architecture
+print peFile.entrypoint
