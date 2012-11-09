@@ -393,12 +393,31 @@ class _IMAGE_IMPORT_DESCRIPTOR (Structure):
         ('FirstThunk', c_uint32),
     ]
 
+# class _IMPORT_LOOKUP_TABLE (Structure):
+#     class _u1 (Structure):
+#         _pack_ = 1
+#         _fields_ = [
+#             ('OrdinalFlag', c_uint32, 1),
+#             ('HintNameRva', c_uint32, 31),
+#         ]
+#     _pack_ = 1
+#     _fields_ = [
+#         ('OrdinalFlag', c_uint32, 1),
+#         ('HintNameRva', c_uint32, 31),
+#     ]
+#     if _fields_[0][1] == 1:
+#         _fields_ = [
+#             ('OrdinalFlag', c_uint32, 1),
+#             ('unused', c_uint32, 15),
+#             ('Ordinal', c_uint32, 15),
+#         ]
+
 # import name entry
 class _IMAGE_IMPORT_BY_NAME (Structure):
     _pack_ = 1
     _fields_ = [
         ('Hint', c_uint16),
-        ('Name', c_uint8)
+        ('Name', c_char_p)
     ]
 
 class _IMAGE_THUNK_DATA64 (Structure):
@@ -495,9 +514,75 @@ class PE:
     def seek(self, offset, whence=os.SEEK_SET):
         return self.f.seek(offset, whence)
 
+    def tell(self):
+        return self.f.tell()
+
     # -1 here means read to EOF, same as built-in read
     def read(self, size=-1):
         return self.f.read(size)
+
+    # read a null-terminated string at the current offset in the file
+    # doesn't move point in file
+    def readString(self):
+        # save place in file
+        pos = self.tell()
+
+        str = ''
+        tmp = self.read(1)
+
+        while (tmp != '') and (tmp !='\0'):
+            str += tmp
+            tmp = self.read(1)
+
+        # reset place in file
+        self.seek(pos)
+        return str
+
+    # same as readString, but reads at the given offset,
+    # doesn't move point in file
+    def readStringRva(self, rva):
+        # save place in file
+        pos = self.tell()
+
+        self.seek(self.rva2ofs(rva))
+        str = self.readString()
+
+        # reset place in file
+        self.seek(pos)
+        return str
+
+    # given a class and rva, try and make an instance of the class
+    # by filling with what's at the offset which corresponds with the rva
+    # doesn't move point in file
+    def fill(self, type, rva):
+        # save place in file
+        pos = self.tell()
+
+        # goto the offset to read this structure
+        self.seek(self.rva2ofs(rva))
+
+        # figure out how big this struct is
+        # and read it 
+        tmp = type()
+        bytes = self.read(sizeof(tmp))
+        fit = min(len(bytes), sizeof(tmp))
+
+        # do the fill
+        memmove(addressof(tmp), bytes, fit)
+
+        # reset place in file
+        self.seek(pos)
+        return tmp
+
+    # checks to see if this structure is all zero'd out
+    def isNull(self, struct):
+        null = buffer('\0' * sizeof(struct))
+        structBuf = buffer(struct)
+
+        for i,v in enumerate(null):
+            if null[i] != structBuf[i]:
+                return False
+        return True
 
 if __name__ == "__main__":
 	f = open('print.exe', 'rb')
@@ -519,9 +604,3 @@ if __name__ == "__main__":
 	print 'e_lfanew', peFile.e_lfanew
 	print 'architecture', peFile.architecture
 	print 'entrypoint', peFile.entrypoint
-
-
-	# checking imports!
-	pe_get_directories(peFile_ptr)
-	print peFile.directories_ptr.contents
-	print peFile.directories_ptr.contents.contents.VirtualAddress
