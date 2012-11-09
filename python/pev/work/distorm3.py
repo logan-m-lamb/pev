@@ -899,6 +899,7 @@ def DecomposeGenerator(codeOffset, code, dt, features = 0):
         for index in xrange(used):
             di = result[index]
 
+            instruction_off = di.addr - codeOffset
             yield Instruction(di, code[instruction_off : instruction_off + di.size], dt)
             delta += di.size
             instruction_off += di.size

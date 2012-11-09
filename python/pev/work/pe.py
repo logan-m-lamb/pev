@@ -466,7 +466,7 @@ class PE:
     # f is an opened peFile
     def __init__(self, f):
         self.f = f
-        self.f.seek(0, os.SEEK_SET)
+        self.seek(0, os.SEEK_SET)
         pythonapi.PyFile_AsFile.argtypes = [ py_object ]
         pythonapi.PyFile_AsFile.restype = FILE_ptr
 
@@ -491,6 +491,13 @@ class PE:
 
     def ofs2rva(self, addr):
         return ofs2rva(self.peFile_ptr, addr)
+    
+    def seek(self, offset, whence=os.SEEK_SET):
+        return self.f.seek(offset, whence)
+
+    # -1 here means read to EOF, same as built-in read
+    def read(self, size=-1):
+        return self.f.read(size)
 
 if __name__ == "__main__":
 	f = open('print.exe', 'rb')
