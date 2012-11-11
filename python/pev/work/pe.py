@@ -60,6 +60,7 @@ MZ   = 0x5a4d
 # typedef uint64_t QWORD;
 
 MAX_SECTIONS = 96
+MAX_FUNCTION_NAME = 512
 
 # section name size
 IMAGE_SIZEOF_SHORT_NAME = 8
@@ -393,31 +394,58 @@ class _IMAGE_IMPORT_DESCRIPTOR (Structure):
         ('FirstThunk', c_uint32),
     ]
 
-# class _IMPORT_LOOKUP_TABLE (Structure):
-#     class _u1 (Structure):
-#         _pack_ = 1
-#         _fields_ = [
-#             ('OrdinalFlag', c_uint32, 1),
-#             ('HintNameRva', c_uint32, 31),
-#         ]
-#     _pack_ = 1
-#     _fields_ = [
-#         ('OrdinalFlag', c_uint32, 1),
-#         ('HintNameRva', c_uint32, 31),
-#     ]
-#     if _fields_[0][1] == 1:
-#         _fields_ = [
-#             ('OrdinalFlag', c_uint32, 1),
-#             ('unused', c_uint32, 15),
-#             ('Ordinal', c_uint32, 15),
-#         ]
+    # delegate to the union
+    def __getattr__(self, attr):
+        return getattr(self.u1, attr)
+
+class _IMPORT_LOOKUP_TABLE32 (Union):
+    _pack_ = 1
+    _fields_ = [
+	# this is if OrdinalFlag is set
+        ('OrdinalNumber', c_uint32, 16),
+        ('_unused', c_uint32, 15),
+        ('OrdinalFlag', c_uint32, 1),
+
+	# this is if OrdinalFlag is NOT set
+        ('HintNameRva', c_uint32, 31),
+        ('OrdinalFlag', c_uint32, 1),
+
+	# this is if this ILT structure is being used
+    # as a bound IAT entry 
+        ('Address', c_uint32)
+    ]
+
+    def __eq__(self, other):
+        return self.Address == other.Address
+
+class _IMPORT_LOOKUP_TABLE64 (Union):
+    _pack_ = 1
+    _fields_ = [
+	# this is if OrdinalFlag is set
+        ('OrdinalNumber', c_uint64, 16),
+        ('_unused', c_uint64, 47),
+        ('OrdinalFlag', c_uint64, 1),
+
+	# this is if OrdinalFlag is NOT set
+        ('HintNameRva', c_uint64, 31),
+        ('_unused', c_uint64, 32), # these must be set to zero
+        ('OrdinalFlag', c_uint64, 1),
+
+	# this is if this ILT structure is being used
+    # as a bound IAT entry 
+        ('Address', c_uint64)
+    ]
+
+    def __eq__(self, other):
+        return self.Address == other.Address
 
 # import name entry
 class _IMAGE_IMPORT_BY_NAME (Structure):
     _pack_ = 1
     _fields_ = [
         ('Hint', c_uint16),
-        ('Name', c_char_p)
+        ('Name', c_char * MAX_FUNCTION_NAME)
+        #('Name', c_char)
     ]
 
 class _IMAGE_THUNK_DATA64 (Structure):
