@@ -112,7 +112,6 @@ def doWork(workQ):
     if hasAddr(inst.address):
         print 'Found a loop!', hex(inst.address), inst, inst.flowControl
         return
-    encountered.append(range(workRva, inst.address+1))
 
     # loop until we hit a break condition ( a return )
     while True:
@@ -138,6 +137,9 @@ def doWork(workQ):
         # "FC_INT",
         # Indicates the instruction is one of: CMOVxx.
         # "FC_CMOV"
+
+        # add this sequence to the encountered list 
+        encountered.append(range(workRva, inst.address+1))
 
         # if we hit a ret return for now
         if inst.flowControl == 'FC_RET':
@@ -229,18 +231,12 @@ def doWork(workQ):
             f.seek(f.rva2ofs(workRva))
             offset = workRva
 
-        # read the next instruction and add it to the encountered list
+        # read the next instruction
         code = f.read()
         iterable = distorm3.DecomposeGenerator(offset, code, dt, \
             distorm3.DF_RETURN_FC_ONLY | distorm3.DF_STOP_ON_FLOW_CONTROL)
-
-        # add this encountered range before grabbing the next inst which could be anywhere
-        # these encountered ranges should be increase from lower address to higher
-        encountered.append(range(workRva, inst.address+1))
-        if (inst.address+1)<= workRva:
-            print 'problem! {:x} {:x}'.format(workRva, (inst.address+1))
-            sys.exit(1)
         inst = iterable.next()
+
         # if we've encountered a loop exit
         if hasAddr(inst.address):
             print 'Found a loop!', hex(inst.address), inst, inst.flowControl
