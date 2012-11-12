@@ -12,6 +12,7 @@ import distorm3
 # then add fall through and taking the operand.
 encountered = list()
 externTable = {}
+initTermTable = 0
 
 def hasAddr(addr):
     for r in encountered:
@@ -72,33 +73,39 @@ def doInitTermTable(addr):
     print 'initerm {:x}'.format(addr)
     
     possibleThunkCall = []
+    isThunk = False
 
     for r in encountered:
-        for i in r[0]:
-            print '{:x}'.format(i),
-        print
+        # if the last instruction of this sequence was the init
+        # address keep track of it
         if r[0][-1]==addr:
-            possibleThunkCall += r
+            possibleThunkCall.append(r)
         if r[0][0]==addr and r[0][-1]==addr:
-            print '''it's a thunk!'''
             isThunk = True
 
-    #if isThunk:
-    #    for r in possibleThunkCall:
-    #        print '{:x}'.format(r)
+    # if this is a thunk, find the addr which branches to it
+    if isThunk:
+        # for now only handling ONE call
+        for r in encountered:
+            if addr in r[1]:
+                print 'call to {:x} from {:x}'.format(addr, r[0][0])
+                doInitTermTable(r[0][0])
+                break
+        #for r in possibleThunkCall:
+        #    print 'thunk'
+        #    print 'seq',
+        #    for e in r[0]:
+        #        print '{:x}'.format(e),
+        #    print
+        #    print 'branch',
+        #    for e in r[1]:
+        #        print '{:x}'.format(e),
+    else:
+        print 'call to _initterm from {:x}'.format(addr)
 
-    # f.seek(f.rva2ofs(addr))
-    # code = f.read()
-
-    # # distorm it and get the next flowcontrol instruction
-    # offset = workRva
-    # # when disassembling now return everything but stop on the first flowcontrol
-    # # which should be the reference to initterm or the reference to the initerm thunk
-    # iterable = distorm3.DecomposeGenerator(offset, code, dt
-    #     distorm3.DF_STOP_ON_FLOW_CONTROL)
-    # inst = iterable.next()
 
 def doWork(workQ):
+    global initTermTable
 
     # get the next rva to do work on
     workRva = workQ.pop()
@@ -205,13 +212,14 @@ def doWork(workQ):
                 if addr in externTable:
                     print 'extern call', externTable[addr]
                     if externTable[addr] == '_initterm':
-                        doInitTermTable(workRva)
+                        initTermTable = workRva
+                        print 'initTermTable', initTermTable
                 else:
                     print 'absolute call {:x}'.format(addr)
 
-                    # add this sequence+branchList to the encountered list
-                    rva = inst.operands[0].value - f.imagebase
-                    branchList.append(rva)
+                # add this sequence+branchList to the encountered list
+                rva = inst.operands[0].value - f.imagebase
+                branchList.append(rva)
             elif type == 'Immediate':
                 rva = inst.operands[0].value
                 print 'FC_CALL', inst.operands[0].type, rva
@@ -249,7 +257,12 @@ def doWork(workQ):
                 if addr in externTable:
                     print 'extern jmp', externTable[addr]
                     if externTable[addr] == '_initterm':
-                        doInitTermTable(workRva)
+                        initTermTable = workRva
+                        print 'initTermTable', initTermTable
+
+                        # add this sequence+branch to the encountered list
+                        rva = addr - f.imagebase
+                        encountered.append((range(workRva, inst.address+1), [rva]))
                     return
                 else:
                     print 'absolute jmp {:x}'.format(addr)
@@ -291,8 +304,8 @@ def doWork(workQ):
 
             f.seek(f.rva2ofs(fallThrough))
             offset = fallThrough
-        # we should never be here
         else:
+            # WE SHOULD NEVER BE HERE
             # print what we've got
             print hex(inst.address), inst, inst.flowControl
             sys.exit(1)
@@ -307,7 +320,7 @@ def doWork(workQ):
         if hasAddr(inst.address):
             print 'Found a loop!', hex(inst.address), inst, inst.flowControl
             return
-        workRva = inst.address
+        workRva = offset
 
 if __name__ == '__main__':
     f = PE(open('print.exe', 'rb'))
@@ -327,3 +340,7 @@ if __name__ == '__main__':
     while workQ:
         doWork(workQ)
 
+    print 'initTermTable', initTermTable
+    doInitTermTable(initTermTable)
+
+    print '# Sequences', len(encountered)
