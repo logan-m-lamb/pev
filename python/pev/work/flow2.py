@@ -6,15 +6,16 @@ from pe import PE
 import collections
 import distorm3
 
-# the encountered list contains tuples of (range, addr)
+# the encountered list contains tuples of (range, [addr])
 # where the range is the sequence and the addr is where
-# control flow went next
+# control flow went next. if control flow was a call or cnd jmp
+# then add fall through and taking the operand.
 encountered = list()
 externTable = {}
 
 def hasAddr(addr):
     for r in encountered:
-        if addr in r:
+        if addr in r[0]:
             return True
     return False
 
@@ -73,14 +74,18 @@ def doInitTermTable(addr):
     possibleThunkCall = []
 
     for r in encountered:
-        if r[-1]==addr:
+        for i in r[0]:
+            print '{:x}'.format(i),
+        print
+        if r[0][-1]==addr:
             possibleThunkCall += r
-        if r[0]==addr and r[-1]==addr:
+        if r[0][0]==addr and r[0][-1]==addr:
             print '''it's a thunk!'''
             isThunk = True
-    if isThunk:
-        for r in possibleThunkCall:
-            print '{:x}'.format(r)
+
+    #if isThunk:
+    #    for r in possibleThunkCall:
+    #        print '{:x}'.format(r)
 
     # f.seek(f.rva2ofs(addr))
     # code = f.read()
@@ -138,13 +143,16 @@ def doWork(workQ):
         # Indicates the instruction is one of: CMOVxx.
         # "FC_CMOV"
 
-        # add this sequence to the encountered list 
-        encountered.append(range(workRva, inst.address+1))
-
         # if we hit a ret return for now
         if inst.flowControl == 'FC_RET':
             print hex(inst.address), inst, inst.flowControl
+            # add this sequence to the encountered list 
+            encountered.append((range(workRva, inst.address+1), []))
+            print 'encountered ret {:x} {:x}'.format(workRva, inst.address)
             return
+
+
+
 
         # if a conditional branch, don't take it
         elif inst.flowControl == 'FC_CND_BRANCH':
@@ -154,24 +162,44 @@ def doWork(workQ):
             # don't goto the conditional branch's operand, add it to the workQ
             # if it's an immediate or absolute memory address operand
             type = inst.operands[0].type
+            branchList = []
             if type == 'AbsoluteMemoryAddress':
                 rva = inst.operands[0].value - f.imagebase
-                print 'adding workQ ABS: {:x}'.format(inst.operands[0].value)
+                print 'adding workQ ABS: {:x}'.format(rva)
                 workQ.append(rva)
+                branchList.append(rva)
             elif type == 'Immediate':
-                print 'adding workQ IMM: {:x}'.format(inst.operands[0].value)
+                rva = inst.operands[0].value
+                print 'adding workQ IMM: {:x}'.format(rva)
                 workQ.append(inst.operands[0].value)
+                branchList.append(rva)
             else:
                 print 'unhandled', type
 
             # fall through this branch
-            f.seek(f.rva2ofs(inst.address+inst.size))
-            offset = inst.address + inst.size
+            fallThrough = inst.address + inst.size
+            branchList.append(fallThrough)
+
+            # add this sequence+branchList to the encountered list
+            encountered.append((range(workRva, inst.address+1), branchList))
+            print 'encountered CND {:x} {:x}'.format(workRva, inst.address)
+
+            # fall through this conditional branch, press on
+            f.seek(f.rva2ofs(fallThrough))
+            offset = fallThrough
+
+
+
 
         # if a call to an absolute memory address don't follow it for now
         elif inst.flowControl == 'FC_CALL':
+            # print what we've got
             print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
+
+            # don't goto the call's operand, add it to the workQ
+            # if it's an immediate or absolute memory address operand
             type = inst.operands[0].type
+            branchList = []
             if type == 'AbsoluteMemoryAddress':
                 addr = inst.operands[0].value
                 if addr in externTable:
@@ -180,18 +208,41 @@ def doWork(workQ):
                         doInitTermTable(workRva)
                 else:
                     print 'absolute call {:x}'.format(addr)
+
+                    # add this sequence+branchList to the encountered list
                     rva = inst.operands[0].value - f.imagebase
-                    f.seek(f.rva2ofs(rva))
-                    offset = rva
+                    branchList.append(rva)
             elif type == 'Immediate':
-                print 'FC_CALL', inst.operands[0].type, inst.operands[0].value
-                workQ.append(inst.operands[0].value)
+                rva = inst.operands[0].value
+                print 'FC_CALL', inst.operands[0].type, rva
+
+                # add this sequence+branchList to the encountered list
+                branchList.append(rva)
+
+                workQ.append(rva)
             else:
                 print 'unhandled', type
-            f.seek(f.rva2ofs(inst.address+inst.size))
-            offset = inst.address + inst.size
+            fallThrough = inst.address+inst.size
+            branchList.append(fallThrough)
+
+            # add this sequence+branchList to the encountered list
+            encountered.append((range(workRva, inst.address+1), branchList))
+            print 'encountered CALL {:x} {:x}'.format(workRva, inst.address)
+
+            # fall through this call, press on
+            f.seek(f.rva2ofs(fallThrough))
+            offset = fallThrough
+
+
+
+
         elif inst.flowControl == 'FC_UNC_BRANCH':
+            # print what we've got
             print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
+
+            # this is an unconditional jump, so we always take the operand.
+            # Problem is we aren't doing computed calls, so if we encounter
+            # anything other than an AbsoluteMemoryAddress or Immediate we punt
             type = inst.operands[0].type
             if type == 'AbsoluteMemoryAddress':
                 addr = inst.operands[0].value
@@ -202,34 +253,49 @@ def doWork(workQ):
                     return
                 else:
                     print 'absolute jmp {:x}'.format(addr)
+
+                    # add this sequence+branch to the encountered list
                     rva = inst.operands[0].value - f.imagebase
+                    encountered.append((range(workRva, inst.address+1), [rva]))
+                    print 'encountered UNC {:x} {:x}'.format(workRva, inst.address)
+
+                    # this is an unconditional branch, take it
                     f.seek(f.rva2ofs(rva))
                     offset = rva
             elif type == 'Immediate':
                 print 'FC_UNC_BRANCH', inst.operands[0].type, inst.operands[0].value
-                f.seek(f.rva2ofs(inst.operands[0].value))
-                offset = inst.operands[0].value
+
+                # add this sequence+branchList to the encountered list
+                rva = inst.operands[0].value
+                encountered.append((range(workRva, inst.address+1), [rva]))
+                print 'encountered UNC {:x} {:x}'.format(workRva, inst.address)
+
+                # this is an unconditional branch, take it
+                f.seek(f.rva2ofs(rva))
+                offset = rva
             else:
                 print 'unhandled', type
-        elif inst.flowControl == 'FC_INT':
+
+
+
+        # these are unhandled flowControl types
+        elif inst.flowControl in ['FC_INT', 'FC_SYS', 'FC_CMOV']:
             print 'unhandled', hex(inst.address), inst, inst.flowControl
-            f.seek(f.rva2ofs(inst.address+inst.size))
-            offset = inst.address + inst.size
-        elif inst.flowControl == 'FC_SYS':
-            print 'unhandled', hex(inst.address), inst, inst.flowControl
-            f.seek(f.rva2ofs(inst.address+inst.size))
-            offset = inst.address + inst.size
-        elif inst.flowControl == 'FC_CMOV':
-            print 'unhandled', hex(inst.address), inst, inst.flowControl
-            f.seek(f.rva2ofs(inst.address+inst.size))
-            offset = inst.address + inst.size
+
+            # unhandled, just fall through and add nothing to the work stack
+            fallThrough = inst.address + inst.size
+
+            # add this sequence to the encountered list 
+            encountered.append((range(workRva, inst.address+1), [fallThrough]))
+            print 'encountered UNK {:x} {:x}'.format(workRva, inst.address)
+
+            f.seek(f.rva2ofs(fallThrough))
+            offset = fallThrough
+        # we should never be here
         else:
             # print what we've got
             print hex(inst.address), inst, inst.flowControl
             sys.exit(1)
-            workRva = inst.operands[0].value
-            f.seek(f.rva2ofs(workRva))
-            offset = workRva
 
         # read the next instruction
         code = f.read()
@@ -255,10 +321,7 @@ if __name__ == '__main__':
     # distorm3 
     dt = distorm3.Decode32Bits
 
-    # inst1
-    f.seek(f.rva2ofs(f.entrypoint))
-    code = f.read()
-
+    # add the entrypoint to the workQ
     workQ.append(f.entrypoint)
 
     while workQ:
