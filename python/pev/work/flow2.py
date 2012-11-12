@@ -119,8 +119,17 @@ def doWork(workQ):
             print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
 
             # don't goto the conditional branch's operand, add it to the workQ
-            print 'adding workQ: {:x}'.format(inst.operands[0].value)
-            workQ.append(inst.operands[0].value)
+            # if it's an immediate or absolute memory address operand
+            type = inst.operands[0].type
+            if type == 'AbsoluteMemoryAddress':
+                rva = inst.operands[0].value - f.imagebase
+                print 'adding workQ ABS: {:x}'.format(inst.operands[0].value)
+                workQ.append(rva)
+            elif type == 'Immediate':
+                print 'adding workQ IMM: {:x}'.format(inst.operands[0].value)
+                workQ.append(inst.operands[0].value)
+            else:
+                print 'unhandled', type
 
             # fall through this branch
             f.seek(f.rva2ofs(inst.address+inst.size))
@@ -129,30 +138,42 @@ def doWork(workQ):
         # if a call to an absolute memory address don't follow it for now
         elif inst.flowControl == 'FC_CALL':
             print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
-            if inst.operands[0].type == 'AbsoluteMemoryAddress':
+            type = inst.operands[0].type
+            if type == 'AbsoluteMemoryAddress':
                 addr = inst.operands[0].value
                 if addr in externTable:
                     print 'extern call', externTable[addr]
                 else:
                     print 'absolute call {:x}'.format(addr)
-            else:
+                    rva = inst.operands[0].value - f.imagebase
+                    f.seek(f.rva2ofs(rva))
+                    offset = rva
+            elif type == 'Immediate':
                 print 'FC_CALL', inst.operands[0].type, inst.operands[0].value
                 workQ.append(inst.operands[0].value)
+            else:
+                print 'unhandled', type
             f.seek(f.rva2ofs(inst.address+inst.size))
             offset = inst.address + inst.size
         elif inst.flowControl == 'FC_UNC_BRANCH':
             print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
-            if inst.operands[0].type == 'AbsoluteMemoryAddress':
+            type = inst.operands[0].type
+            if type == 'AbsoluteMemoryAddress':
                 addr = inst.operands[0].value
                 if addr in externTable:
                     print 'extern jmp', externTable[addr]
+                    return
                 else:
                     print 'absolute jmp {:x}'.format(addr)
-            else:
+                    rva = inst.operands[0].value - f.imagebase
+                    f.seek(f.rva2ofs(rva))
+                    offset = rva
+            elif type == 'Immediate':
                 print 'FC_UNC_BRANCH', inst.operands[0].type, inst.operands[0].value
-                workQ.append(inst.operands[0].value)
-            f.seek(f.rva2ofs(inst.address+inst.size))
-            offset = inst.address + inst.size
+                f.seek(f.rva2ofs(inst.operands[0].value))
+                offset = inst.operands[0].value
+            else:
+                print 'unhandled', type
         elif inst.flowControl == 'FC_INT':
             print 'unhandled', hex(inst.address), inst, inst.flowControl
             f.seek(f.rva2ofs(inst.address+inst.size))
