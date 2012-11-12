@@ -6,6 +6,9 @@ from pe import PE
 import collections
 import distorm3
 
+# the encountered list contains tuples of (range, addr)
+# where the range is the sequence and the addr is where
+# control flow went next
 encountered = list()
 externTable = {}
 
@@ -61,6 +64,35 @@ def getExterns(f):
 
         nextEntryRva += ctypes.sizeof(id)
 
+# this is the address of the beginning of the sequence containing
+# the reference to initterm. If this is infact a thunk, backtrack some
+# more
+def doInitTermTable(addr):
+    print 'initerm {:x}'.format(addr)
+    
+    possibleThunkCall = []
+
+    for r in encountered:
+        if r[-1]==addr:
+            possibleThunkCall += r
+        if r[0]==addr and r[-1]==addr:
+            print '''it's a thunk!'''
+            isThunk = True
+    if isThunk:
+        for r in possibleThunkCall:
+            print '{:x}'.format(r)
+
+    # f.seek(f.rva2ofs(addr))
+    # code = f.read()
+
+    # # distorm it and get the next flowcontrol instruction
+    # offset = workRva
+    # # when disassembling now return everything but stop on the first flowcontrol
+    # # which should be the reference to initterm or the reference to the initerm thunk
+    # iterable = distorm3.DecomposeGenerator(offset, code, dt
+    #     distorm3.DF_STOP_ON_FLOW_CONTROL)
+    # inst = iterable.next()
+
 def doWork(workQ):
 
     # get the next rva to do work on
@@ -78,7 +110,6 @@ def doWork(workQ):
 
     # check if we've been here before, if so stop doing here
     if hasAddr(inst.address):
-        #print 'Found a loop!', hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
         print 'Found a loop!', hex(inst.address), inst, inst.flowControl
         return
     encountered.append(range(workRva, inst.address+1))
@@ -143,6 +174,8 @@ def doWork(workQ):
                 addr = inst.operands[0].value
                 if addr in externTable:
                     print 'extern call', externTable[addr]
+                    if externTable[addr] == '_initterm':
+                        doInitTermTable(workRva)
                 else:
                     print 'absolute call {:x}'.format(addr)
                     rva = inst.operands[0].value - f.imagebase
@@ -162,6 +195,8 @@ def doWork(workQ):
                 addr = inst.operands[0].value
                 if addr in externTable:
                     print 'extern jmp', externTable[addr]
+                    if externTable[addr] == '_initterm':
+                        doInitTermTable(workRva)
                     return
                 else:
                     print 'absolute jmp {:x}'.format(addr)
@@ -199,13 +234,18 @@ def doWork(workQ):
         iterable = distorm3.DecomposeGenerator(offset, code, dt, \
             distorm3.DF_RETURN_FC_ONLY | distorm3.DF_STOP_ON_FLOW_CONTROL)
 
+        # add this encountered range before grabbing the next inst which could be anywhere
+        # these encountered ranges should be increase from lower address to higher
+        encountered.append(range(workRva, inst.address+1))
+        if (inst.address+1)<= workRva:
+            print 'problem! {:x} {:x}'.format(workRva, (inst.address+1))
+            sys.exit(1)
         inst = iterable.next()
         # if we've encountered a loop exit
         if hasAddr(inst.address):
-            #print 'Found a loop!', hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
             print 'Found a loop!', hex(inst.address), inst, inst.flowControl
             return
-        encountered.append(range(workRva, inst.address+1))
+        workRva = inst.address
 
 if __name__ == '__main__':
     f = PE(open('print.exe', 'rb'))
