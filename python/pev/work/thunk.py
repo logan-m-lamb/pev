@@ -5,7 +5,7 @@ import distorm3
 import ctypes
 
 if __name__ == '__main__':
-    f = pe.PE(open('/tmp/pewter.exe', 'rb'))
+    f = pe.PE(open('print.exe', 'rb'))
     
     # get VA of Import Directory
     dirTableRva = f.directories_ptr[pe.IMAGE_DIRECTORY_ENTRY_IMPORT].contents.VirtualAddress
