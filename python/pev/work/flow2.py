@@ -7,6 +7,8 @@ import collections
 import distorm3
 
 encountered = list()
+externTable = {}
+
 def hasAddr(addr):
     for r in encountered:
         if addr in r:
@@ -14,7 +16,6 @@ def hasAddr(addr):
     return False
 
 def getExterns(f):
-    externTable = {}
 
     # get VA of Import Directory
     dirTableRva = f.directories_ptr[pe.IMAGE_DIRECTORY_ENTRY_IMPORT].contents.VirtualAddress
@@ -50,9 +51,9 @@ def getExterns(f):
             if iltEntry.OrdinalFlag == 0:
                 hintNameTable = f.fill(pe._IMAGE_IMPORT_BY_NAME, iltEntry.HintNameRva)
                 
-                externTable[nextIatRva] = hintNameTable.Name
+                externTable[nextIatRva + f.imagebase] = hintNameTable.Name
             else:
-                externTable[nextIatRva] = 'Ordinal: '+ iltEntry.OrdinalNumber
+                externTable[nextIatRva + f.imagebase] = 'Ordinal: '+ iltEntry.OrdinalNumber
 
             # either way, go to next entry
             nextIltRva += ctypes.sizeof(iltEntry)
@@ -60,48 +61,57 @@ def getExterns(f):
 
         nextEntryRva += ctypes.sizeof(id)
 
-    return externTable
+def doWork(workQ):
 
+    # get the next rva to do work on
+    workRva = workQ.pop()
+    print 'doing work {:x}\n'.format(workRva)
 
-if __name__ == '__main__':
-    f = PE(open('print.exe', 'rb'))
-    print 'ImageBase', f.imagebase
-    print 'entrypoint ofs', hex(f.rva2ofs(f.entrypoint))
-
-    # some datastructure of interest
-    externTable = getExterns(f)
-    workQ = collections.deque()
-
-    # distorm3 
-    dt = distorm3.Decode32Bits
-
-    # inst1
-    f.seek(f.rva2ofs(f.entrypoint))
+    f.seek(f.rva2ofs(workRva))
     code = f.read()
 
-    offset = f.entrypoint
-
+    # distorm it and get the next flowcontrol instruction
+    offset = workRva
     iterable = distorm3.DecomposeGenerator(offset, code, dt, \
         distorm3.DF_RETURN_FC_ONLY | distorm3.DF_STOP_ON_FLOW_CONTROL)
-
     inst = iterable.next()
-    
-    # add what we've encountered
-    encountered.append(range(f.entrypoint, inst.address+1))
-    print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
 
-    # while workQ:
-    #     doWork()
+    # check if we've been here before, if so stop doing here
+    if hasAddr(inst.address):
+        #print 'Found a loop!', hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
+        print 'Found a loop!', hex(inst.address), inst, inst.flowControl
+        return
+    encountered.append(range(workRva, inst.address+1))
 
+    # loop until we hit a break condition ( a return )
     while True:
         #
         # handle various instructions differently
         #
+        # the types of instructions we have are:
+        # 
+        # Indicates the instruction is not a flow-control instruction.
+        # "FC_NONE",
+        # Indicates the instruction is one of: CALL, CALL FAR.
+        # "FC_CALL",
+        # Indicates the instruction is one of: RET, IRET, RETF.
+        # "FC_RET",
+        # Indicates the instruction is one of: SYSCALL, SYSRET, SYSENTER, SYSEXIT.
+        # "FC_SYS",
+        # Indicates the instruction is one of: JMP, JMP FAR.
+        # "FC_UNC_BRANCH",
+        # Indicates the instruction is one of:
+        # JCXZ, JO, JNO, JB, JAE, JZ, JNZ, JBE, JA, JS, JNS, JP, JNP, JL, JGE, JLE, JG, LOOP, LOOPZ, LOOPNZ.
+        # "FC_CND_BRANCH",
+        # Indiciates the instruction is one of: INT, INT1, INT 3, INTO, UD2.
+        # "FC_INT",
+        # Indicates the instruction is one of: CMOVxx.
+        # "FC_CMOV"
 
         # if we hit a ret return for now
         if inst.flowControl == 'FC_RET':
             print hex(inst.address), inst, inst.flowControl
-            sys.exit()
+            return
 
         # if a conditional branch, don't take it
         elif inst.flowControl == 'FC_CND_BRANCH':
@@ -109,23 +119,59 @@ if __name__ == '__main__':
             print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
 
             # don't goto the conditional branch's operand, add it to the workQ
-            print 'workQ: {:x}'.format(inst.operands[0].value)
+            print 'adding workQ: {:x}'.format(inst.operands[0].value)
             workQ.append(inst.operands[0].value)
 
             # fall through this branch
             f.seek(f.rva2ofs(inst.address+inst.size))
             offset = inst.address + inst.size
+
         # if a call to an absolute memory address don't follow it for now
-        elif inst.operands[0].type == 'AbsoluteMemoryAddress':
-            print 'absolute call', inst.operands[0].type
+        elif inst.flowControl == 'FC_CALL':
+            print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
+            if inst.operands[0].type == 'AbsoluteMemoryAddress':
+                addr = inst.operands[0].value
+                if addr in externTable:
+                    print 'extern call', externTable[addr]
+                else:
+                    print 'absolute call {:x}'.format(addr)
+            else:
+                print 'FC_CALL', inst.operands[0].type, inst.operands[0].value
+                workQ.append(inst.operands[0].value)
+            f.seek(f.rva2ofs(inst.address+inst.size))
+            offset = inst.address + inst.size
+        elif inst.flowControl == 'FC_UNC_BRANCH':
+            print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
+            if inst.operands[0].type == 'AbsoluteMemoryAddress':
+                addr = inst.operands[0].value
+                if addr in externTable:
+                    print 'extern jmp', externTable[addr]
+                else:
+                    print 'absolute jmp {:x}'.format(addr)
+            else:
+                print 'FC_UNC_BRANCH', inst.operands[0].type, inst.operands[0].value
+                workQ.append(inst.operands[0].value)
+            f.seek(f.rva2ofs(inst.address+inst.size))
+            offset = inst.address + inst.size
+        elif inst.flowControl == 'FC_INT':
+            print 'unhandled', hex(inst.address), inst, inst.flowControl
+            f.seek(f.rva2ofs(inst.address+inst.size))
+            offset = inst.address + inst.size
+        elif inst.flowControl == 'FC_SYS':
+            print 'unhandled', hex(inst.address), inst, inst.flowControl
+            f.seek(f.rva2ofs(inst.address+inst.size))
+            offset = inst.address + inst.size
+        elif inst.flowControl == 'FC_CMOV':
+            print 'unhandled', hex(inst.address), inst, inst.flowControl
             f.seek(f.rva2ofs(inst.address+inst.size))
             offset = inst.address + inst.size
         else:
             # print what we've got
-            print hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
-            branchAddr = inst.operands[0].value
-            f.seek(f.rva2ofs(branchAddr))
-            offset = branchAddr
+            print hex(inst.address), inst, inst.flowControl
+            sys.exit(1)
+            workRva = inst.operands[0].value
+            f.seek(f.rva2ofs(workRva))
+            offset = workRva
 
         # read the next instruction and add it to the encountered list
         code = f.read()
@@ -135,6 +181,29 @@ if __name__ == '__main__':
         inst = iterable.next()
         # if we've encountered a loop exit
         if hasAddr(inst.address):
-            print 'Found a loop!', hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
-            sys.exit()
-        encountered.append(range(branchAddr, inst.address+1))
+            #print 'Found a loop!', hex(inst.address), inst, inst.flowControl, inst.operands[0], inst.operands[0].type
+            print 'Found a loop!', hex(inst.address), inst, inst.flowControl
+            return
+        encountered.append(range(workRva, inst.address+1))
+
+if __name__ == '__main__':
+    f = PE(open('print.exe', 'rb'))
+    print 'ImageBase', f.imagebase
+    print 'entrypoint ofs', hex(f.rva2ofs(f.entrypoint))
+    getExterns(f)
+
+    # some datastructure of interest
+    workQ = collections.deque()
+
+    # distorm3 
+    dt = distorm3.Decode32Bits
+
+    # inst1
+    f.seek(f.rva2ofs(f.entrypoint))
+    code = f.read()
+
+    workQ.append(f.entrypoint)
+
+    while workQ:
+        doWork(workQ)
+

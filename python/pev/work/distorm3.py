@@ -717,6 +717,7 @@ class Operand (object):
             self.dispSize = args[5]
         elif type == OPERAND_ABSOLUTE_ADDRESS:
             self.size = args[0]
+            self.value = args[1]
             self.disp = int(args[1])
             self.dispSize = args[2]
         elif type == OPERAND_FAR_MEMORY:
