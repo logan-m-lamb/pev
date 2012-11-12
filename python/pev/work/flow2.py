@@ -70,6 +70,8 @@ def getExterns(f):
 # the reference to initterm. If this is infact a thunk, backtrack some
 # more
 def doInitTermTable(addr):
+    # first, we need to find the sequence which contains the call
+    # to the _initterm thunk
     print 'initerm {:x}'.format(addr)
     
     possibleThunkCall = []
@@ -100,9 +102,21 @@ def doInitTermTable(addr):
         #    print 'branch',
         #    for e in r[1]:
         #        print '{:x}'.format(e),
+
+    # if we're here then addr is the beginning of the sequence which
+    # contains the call to the _initterm thunk. Now, lets get the arguments
+    # to _initterm (the last two things pushed onto the stack)
     else:
         print 'call to _initterm from {:x}'.format(addr)
 
+        f.seek(f.rva2ofs(addr))
+        code = f.read()
+
+        offset = addr
+        iterable = distorm3.DecomposeGenerator(offset, code, dt, distorm3.DF_STOP_ON_FLOW_CONTROL)
+
+        for inst in iterable:
+            print inst
 
 def doWork(workQ):
     global initTermTable
