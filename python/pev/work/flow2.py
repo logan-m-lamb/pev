@@ -1,6 +1,7 @@
 import os
 import sys
 import ctypes
+import re
 import pe
 from pe import PE
 import collections
@@ -13,6 +14,7 @@ import distorm3
 encountered = list()
 externTable = {}
 initTermTable = 0
+getMainArgsAddr = 0
 
 def hasAddr(addr):
     for r in encountered:
@@ -66,10 +68,26 @@ def getExterns(f):
 
         nextEntryRva += ctypes.sizeof(id)
 
+# returns a list of RVAs of functions in this function pointer table
+def findFunctionPointers(f, lowAddr, highAddr):
+    if lowAddr > highAddr:
+        print 'ffp problem'
+        sys.exit(3)
+
+    addr = lowAddr
+    funcList = []
+    while addr <= highAddr:
+        funcPtr = f.fill(ctypes.c_uint32, addr)
+        if funcPtr.value != 0:
+            funcList.append(funcPtr.value - f.imagebase)
+        addr += 4
+    return funcList
+
 # this is the address of the beginning of the sequence containing
 # the reference to initterm. If this is infact a thunk, backtrack some
 # more
-def doInitTermTable(addr):
+# once a call to the thunk is found, return the arguments to _initterm
+def findInitTerm(f, addr):
     # first, we need to find the sequence which contains the call
     # to the _initterm thunk
     print 'initerm {:x}'.format(addr)
@@ -91,8 +109,7 @@ def doInitTermTable(addr):
         for r in encountered:
             if addr in r[1]:
                 print 'call to {:x} from {:x}'.format(addr, r[0][0])
-                doInitTermTable(r[0][0])
-                break
+                return findInitTerm(f, r[0][0])
         #for r in possibleThunkCall:
         #    print 'thunk'
         #    print 'seq',
@@ -113,13 +130,62 @@ def doInitTermTable(addr):
         code = f.read()
 
         offset = addr
-        iterable = distorm3.DecomposeGenerator(offset, code, dt, distorm3.DF_STOP_ON_FLOW_CONTROL)
+        iterable = distorm3.DecomposeGenerator(offset, code, distorm3.Decode32Bits, distorm3.DF_STOP_ON_FLOW_CONTROL)
 
+        pushArgs = []
         for inst in iterable:
+            if inst.mnemonic == 'PUSH':
+                operand = inst.operands[0]
+                if operand.type == 'Immediate':
+                    print operand.type
+                    print '{:x}'.format(inst.operands[0].value - f.imagebase)
+                    pushArgs.append(inst.operands[0].value - f.imagebase)
+                else:
+                    # if this negative one is encountered we bail
+                    pushArgs.append(-1)
             print inst
+
+        # get the last two args, put them in the correct order
+        args = pushArgs[-2:]
+        args.reverse()
+
+        if -1 in args:
+            print 'Problem! diInitTermTable'
+            sys.exit(2)
+
+        print args
+        return args
+
+def getMainArgs(f, addr):
+    f.seek(f.rva2ofs(addr))
+    code = f.read()
+
+    offset = addr
+    iterable = distorm3.DecomposeGenerator(offset, code, distorm3.Decode32Bits, distorm3.DF_STOP_ON_FLOW_CONTROL)
+
+    pushArgs = []
+    for inst in iterable:
+        if inst.mnemonic == 'PUSH':
+            operand = inst.operands[0]
+            print operand, operand.type
+            if operand.type == 'Immediate':
+                print operand.type
+                print '{:x}'.format(inst.operands[0].value - f.imagebase)
+                pushArgs.append(inst.operands[0].value - f.imagebase)
+            else:
+                pushArgs.append(-1)
+        print inst
+
+    args = pushArgs[-3:]
+
+    if -1 in args:
+        print 'Problem! getMainArgs'
+        sys.exit(11)
+    return args
 
 def doWork(workQ):
     global initTermTable
+    global getMainArgsAddr
 
     # get the next rva to do work on
     workRva = workQ.pop()
@@ -130,7 +196,7 @@ def doWork(workQ):
 
     # distorm it and get the next flowcontrol instruction
     offset = workRva
-    iterable = distorm3.DecomposeGenerator(offset, code, dt, \
+    iterable = distorm3.DecomposeGenerator(offset, code, distorm3.Decode32Bits, \
         distorm3.DF_RETURN_FC_ONLY | distorm3.DF_STOP_ON_FLOW_CONTROL)
     inst = iterable.next()
 
@@ -228,6 +294,11 @@ def doWork(workQ):
                     if externTable[addr] == '_initterm':
                         initTermTable = workRva
                         print 'initTermTable', initTermTable
+
+                    m = re.search('^__.*get.*mainargs$', externTable[addr])
+                    if m is not None:
+                       getMainArgsAddr = workRva 
+                       print '__getmainargs', getMainArgsAddr
                 else:
                     print 'absolute call {:x}'.format(addr)
 
@@ -274,9 +345,14 @@ def doWork(workQ):
                         initTermTable = workRva
                         print 'initTermTable', initTermTable
 
-                        # add this sequence+branch to the encountered list
-                        rva = addr - f.imagebase
-                        encountered.append((range(workRva, inst.address+1), [rva]))
+                    m = re.search('^__.*get.*mainargs$', externTable[addr])
+                    if m is not None:
+                       getMainArgsAddr = workRva 
+                       print '__getmainargs', getMainArgsAddr
+
+                    # add this sequence+branch to the encountered list
+                    rva = addr - f.imagebase
+                    encountered.append((range(workRva, inst.address+1), [rva]))
                     return
                 else:
                     print 'absolute jmp {:x}'.format(addr)
@@ -326,7 +402,7 @@ def doWork(workQ):
 
         # read the next instruction
         code = f.read()
-        iterable = distorm3.DecomposeGenerator(offset, code, dt, \
+        iterable = distorm3.DecomposeGenerator(offset, code, distorm3.Decode32Bits, \
             distorm3.DF_RETURN_FC_ONLY | distorm3.DF_STOP_ON_FLOW_CONTROL)
         inst = iterable.next()
 
@@ -342,19 +418,49 @@ if __name__ == '__main__':
     print 'entrypoint ofs', hex(f.rva2ofs(f.entrypoint))
     getExterns(f)
 
-    # some datastructure of interest
-    workQ = collections.deque()
-
-    # distorm3 
-    dt = distorm3.Decode32Bits
 
     # add the entrypoint to the workQ
+    workQ = collections.deque()
     workQ.append(f.entrypoint)
 
+    # explore the program
     while workQ:
         doWork(workQ)
 
-    print 'initTermTable', initTermTable
-    doInitTermTable(initTermTable)
+    # try and get the function pointers from the 
+    # _initterm function pointer table
+    if not initTermTable:
+        print '''couldn't find _initterm'''
+        sys.exit(4)
+    
+    args = findInitTerm(f, initTermTable)
 
+    if args:
+        funcList = findFunctionPointers(f, *args)
+    else:
+        print '''couldn't find _initterm args'''
+        sys.exit(5)
+
+    if not funcList:
+        print 'no functions found in _initterm table'
+        sys.exit(6)
+
+    workQ.extend(funcList)
     print '# Sequences', len(encountered)
+    # explore what was in the _initterm func ptr table
+    while workQ:
+        doWork(workQ)
+    print '# Sequences', len(encountered)
+
+    if not getMainArgsAddr:
+        print '''couldn't find getmainargs'''
+        sys.exit(7)
+        
+    args = getMainArgs(f, getMainArgsAddr)
+    if args:
+        print 'gma',
+        for i in args:
+            print '{:x}'.format(i),
+    else:
+        print '''couldn't find getmainargs args'''
+        sys.exit(8)
