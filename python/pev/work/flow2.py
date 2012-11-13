@@ -1,3 +1,6 @@
+"""flow2.py: Find main entrypoint and exit"""
+__author__ = "Logan Lamb"
+
 import os
 import sys
 import ctypes
@@ -178,6 +181,8 @@ def findInitTerm(f, addr):
         print args
         return args
 
+# given addr which is the address of the sequence which contains
+# __getmainargs, return the args
 def getMainArgs(f, addr):
     f.seek(f.rva2ofs(addr))
     code = f.read()
