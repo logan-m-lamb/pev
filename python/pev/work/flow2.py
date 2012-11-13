@@ -183,6 +183,14 @@ def getMainArgs(f, addr):
         sys.exit(11)
     return args
 
+# start looking for the _main call starting at initTermAddr,
+# we know when we hit the main call by identifying argc,argv,envp
+# being pushed to the stack
+def findMainCall(f, initTermAddr, args):
+    workQ = collections.deque()
+    
+    
+
 def doWork(workQ):
     global initTermTable
     global getMainArgsAddr
@@ -464,3 +472,5 @@ if __name__ == '__main__':
     else:
         print '''couldn't find getmainargs args'''
         sys.exit(8)
+
+    findMainCall(f, initTermTable, args)
