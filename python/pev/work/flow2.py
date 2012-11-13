@@ -10,17 +10,36 @@ import distorm3
 # the encountered list contains tuples of (range, [addr])
 # where the range is the sequence and the addr is where
 # control flow went next. if control flow was a call or cnd jmp
-# then add fall through and taking the operand.
+# then add operand and fallthrough. Take fallthrough, add operand
+# to the workQ
 encountered = list()
 externTable = {}
 initTermTable = 0
+initTermSeq = 0
 getMainArgsAddr = 0
+
+# # returns true if hs contains needle
+# def containsList(hs, needle):
+#     for i in xrange(len(hs)-len(needle)+1):
+#         for j in xrange(len(needle)):
+#             if hs[i+j] != small[j]:
+#                 break
+#         else:
+#             return True
+#     return False
+    
 
 def hasAddr(addr):
     for r in encountered:
         if addr in r[0]:
             return True
     return False
+
+def getSequence(addr):
+    for r in encountered:
+        if addr in r[0]:
+            return r
+    return None
 
 def getExterns(f):
 
@@ -88,6 +107,8 @@ def findFunctionPointers(f, lowAddr, highAddr):
 # more
 # once a call to the thunk is found, return the arguments to _initterm
 def findInitTerm(f, addr):
+    global initTermSeq
+
     # first, we need to find the sequence which contains the call
     # to the _initterm thunk
     print 'initerm {:x}'.format(addr)
@@ -125,6 +146,7 @@ def findInitTerm(f, addr):
     # to _initterm (the last two things pushed onto the stack)
     else:
         print 'call to _initterm from {:x}'.format(addr)
+        initTermSeq = addr
 
         f.seek(f.rva2ofs(addr))
         code = f.read()
@@ -188,8 +210,91 @@ def getMainArgs(f, addr):
 # being pushed to the stack
 def findMainCall(f, initTermAddr, args):
     workQ = collections.deque()
-    
-    
+    print 'findMainCall init addr {:x}'.format(initTermAddr) 
+    workQ.append(initTermAddr)
+
+    # while we have work, look for the call to main
+    while workQ:
+        addr = workQ.pop()
+
+        seq = getSequence(addr)
+
+        # goto the new work addr and disassemble until we hit a flow control
+        f.seek(f.rva2ofs(addr))
+        code = f.read()
+        offset = addr
+        iterable = distorm3.DecomposeGenerator(offset, code, distorm3.Decode32Bits, distorm3.DF_STOP_ON_FLOW_CONTROL)
+
+        pushArgs = []
+        for inst in iterable:
+            if inst.mnemonic == 'PUSH':
+                operand = inst.operands[0]
+                print operand, operand.type
+                if operand.type == 'AbsoluteMemoryAddress':
+                    print operand.type
+                    print '{:x}'.format(inst.operands[0].value - f.imagebase)
+                    pushArgs.append(inst.operands[0].value - f.imagebase)
+                else:
+                    pushArgs.append(-1)
+            print inst
+
+        pushList = pushArgs[-3:]
+
+        print 'pushList', pushList
+        # if we found Main, return the conditional branch for this sequence
+        if pushList == args:
+            print 'found Main! {:x}'.format(seq[1][0])
+            return seq[1][0]
+        # otherwise add all branches to the workQ
+        elif seq is not None:
+            print 'extending',
+            for i in seq[1]: print '{:x}'.format(i),
+            print
+
+            workQ.extend(seq[1])
+    return None
+
+# takes an address and finds its exit
+# by look for a rets
+# we assume this addr has already been explored,
+# otherwise this won't work
+def findFuncExit(f, funcAddr):
+    workQ = collections.deque()
+    print 'findFuncExit for addr {:x}'.format(funcAddr) 
+    workQ.append(funcAddr)
+
+    explored = []
+    retList = []
+    while workQ:
+        addr = workQ.pop()
+
+        if addr in explored:
+            continue
+
+        seq = getSequence(addr)
+        if seq is not None:
+            # if seq[1] is empty then there are no branches
+            # for this sequence, could be a ret or an unhandled
+            # instruction, check for ret
+            if not seq[1]:
+                f.seek(f.rva2ofs(addr))
+                code = f.read()
+
+                # distorm it and get the next flowcontrol instruction
+                offset = addr
+                iterable = distorm3.DecomposeGenerator(offset, code, distorm3.Decode32Bits, \
+                    distorm3.DF_RETURN_FC_ONLY | distorm3.DF_STOP_ON_FLOW_CONTROL)
+                inst = iterable.next()
+
+                if inst.flowControl == 'FC_RET':
+                    retList.append(inst.address)
+            else:
+                print 'extending2',
+                explored.append(addr)
+                for i in seq[1]: print '{:x}'.format(i),
+                print
+                workQ.extend(seq[1])
+    return retList
 
 def doWork(workQ):
     global initTermTable
@@ -301,12 +406,12 @@ def doWork(workQ):
                     print 'extern call', externTable[addr]
                     if externTable[addr] == '_initterm':
                         initTermTable = workRva
-                        print 'initTermTable', initTermTable
+                        print 'initTermTable {:x}'.format(initTermTable)
 
                     m = re.search('^__.*get.*mainargs$', externTable[addr])
                     if m is not None:
                        getMainArgsAddr = workRva 
-                       print '__getmainargs', getMainArgsAddr
+                       print '__getmainargs {:x}'.format(getMainArgsAddr)
                 else:
                     print 'absolute call {:x}'.format(addr)
 
@@ -351,12 +456,12 @@ def doWork(workQ):
                     print 'extern jmp', externTable[addr]
                     if externTable[addr] == '_initterm':
                         initTermTable = workRva
-                        print 'initTermTable', initTermTable
+                        print 'initTermTable {:x}'.format(initTermTable)
 
                     m = re.search('^__.*get.*mainargs$', externTable[addr])
                     if m is not None:
                        getMainArgsAddr = workRva 
-                       print '__getmainargs', getMainArgsAddr
+                       print '__getmainargs {:x}'.format(getMainArgsAddr)
 
                     # add this sequence+branch to the encountered list
                     rva = addr - f.imagebase
@@ -421,7 +526,11 @@ def doWork(workQ):
         workRva = offset
 
 if __name__ == '__main__':
-    f = PE(open('print.exe', 'rb'))
+    if len(sys.argv) != 2:
+        print 'usage: flow2.py path-to-exe'
+        sys.exit(13)
+
+    f = PE(open(sys.argv[1], 'rb'))
     print 'ImageBase', f.imagebase
     print 'entrypoint ofs', hex(f.rva2ofs(f.entrypoint))
     getExterns(f)
@@ -434,16 +543,19 @@ if __name__ == '__main__':
     # explore the program
     while workQ:
         doWork(workQ)
+    print '* Initial Exploration Done'
 
     # try and get the function pointers from the 
     # _initterm function pointer table
     if not initTermTable:
         print '''couldn't find _initterm'''
         sys.exit(4)
-    
+
+    print '* Found _initterm' 
     args = findInitTerm(f, initTermTable)
 
     if args:
+        print '* Found _initterm args' 
         funcList = findFunctionPointers(f, *args)
     else:
         print '''couldn't find _initterm args'''
@@ -453,24 +565,44 @@ if __name__ == '__main__':
         print 'no functions found in _initterm table'
         sys.exit(6)
 
+    print '* Exploring _initerm func pointers'
     workQ.extend(funcList)
-    print '# Sequences', len(encountered)
     # explore what was in the _initterm func ptr table
     while workQ:
         doWork(workQ)
-    print '# Sequences', len(encountered)
+    print '* Exploring _initerm func pointers done'
 
     if not getMainArgsAddr:
         print '''couldn't find getmainargs'''
         sys.exit(7)
-        
+
+    print '* Found call to _getmainargs' 
     args = getMainArgs(f, getMainArgsAddr)
+
     if args:
-        print 'gma',
-        for i in args:
-            print '{:x}'.format(i),
+        print '* Found _getmainargs args:',
+        for i in args: print '{:x}'.format(i),
+        print
     else:
         print '''couldn't find getmainargs args'''
         sys.exit(8)
 
-    findMainCall(f, initTermTable, args)
+    print '* Finding main call'
+    mainAddr = findMainCall(f, initTermSeq, args)
+    if mainAddr is None:
+        print '''couldn't find main'''
+        sys.exit(12)
+    print '* Found main call'
+    print '* Finding main exit'
+    exit = findFuncExit(f, mainAddr)
+    print '* Found main exit',
+    for i in exit: print '{:x}'.format(i),
+    print
+
+    print >> sys.stderr, 'entry: {:x}'.format(mainAddr)
+    print >> sys.stderr, 'exit:  {:x}'.format(exit[0])
+    print >> sys.stderr
+    print >> sys.stderr, 'argc:  {:x}'.format(args[2])
+    print >> sys.stderr, 'argv:  {:x}'.format(args[1])
+    print >> sys.stderr, 'envp:  {:x}'.format(args[0])
+    sys.exit(0)
